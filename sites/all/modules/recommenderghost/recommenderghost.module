@@ -1,0 +1,535 @@
+<?php
+/**
+ * @file
+ * Drupal Module: RecommenderGhost
+ * Adds the required Javascript to the bottom of all your Drupal pages
+ * to allow tracking by the RecommenderGhost recommendation engine.
+ * Adds 2 blocks to display recommendations on a node level
+ *   - list view
+ *   - picture view
+ *
+ * JS Tracking part of this module is based on the Google Analytics module code.
+ *
+ * @author: hhhc
+ */
+
+// Remove tracking from all administrative pages,
+// see http://drupal.org/node/34970.
+define('RECOMMENDERGHOST_PAGES', "admin\nadmin/*\nbatch\nnode/add*\nnode/*/*\nuser/*/*");
+
+// Define global API URL.
+ define('RECOMMENDERGHOST_API_URL', "http://api.recommenderghost.com");
+
+/**
+ * Implements hook_help().
+ */
+function recommenderghost_help($path, $arg) {
+  switch ($path) {
+    case 'admin/config/system/recommenderghost':
+      return t('<a href="@rg_url">RecommenderGhost</a> is a free (registration required) service that allows you to add a recommender system to your website.',
+         array('@rg_url' => 'http://www.recommenderghost.com'));
+  }
+}
+
+/**
+ * Implements hook_permission().
+ */
+function recommenderghost_permission() {
+  return array(
+    'administer recommenderghost' => array(
+      'title' => t('Administer RecommenderGhost'),
+      'description' => t('Perform maintenance tasks for RecommenderGhost.'),
+      'restrict access' => TRUE,
+    ),
+    'use PHP for recommenderghost' => array(
+      'title' => t('Use PHP for tracking visibility'),
+      'description' => t('Enter PHP code in the field for tracking visibility settings.'),
+      'restrict access' => TRUE,
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ */
+function recommenderghost_menu() {
+  $items['admin/config/system/recommenderghost'] = array(
+    'title' => 'RecommenderGhost',
+    'description' => 'Configure tracking and recommendation engine for RecommenderGhost.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('recommenderghost_admin_settings_form'),
+    'access arguments' => array('administer recommenderghost'),
+    'type' => MENU_NORMAL_ITEM,
+    'file' => 'recommenderghost.admin.inc',
+  );
+  return $items;
+}
+
+
+/**
+ * Implements hook_field_extra_fields().
+ */
+function recommenderghost_field_extra_fields() {
+  $extra['user']['user']['form']['recommenderghost'] = array(
+    'label' => t('RecommenderGhost configuration'),
+    'description' => t('RecommenderGhost module form element.'),
+    'weight' => 3,
+  );
+  return $extra;
+}
+
+
+/**
+ * Implements hook_page_alter().
+ *
+ * Inserts JavaScript to the appropriate scope/region of the page.
+ */
+function recommenderghost_page_alter(&$page) {
+  global $user;
+  // Following privacy policy of RecommenderGhost we need to
+  // encode user ids into non-revertable formatOutput.
+  $uid = sha1($user->uid);
+
+  $apikey = variable_get('recommenderghost_apikey', '');
+  $websiteid = variable_get('recommenderghost_websiteid', '');
+
+  $is_node = FALSE;
+  if (arg(0) == 'node' && is_numeric(arg(1))) {
+    $node = node_load(arg(1));
+    $is_node = TRUE;
+  }
+
+  // 1. Check that api key and website id have a value.
+  // 2. Track page views based on visibility value.
+  // 3. Check if we should track the currently active user's role.
+  if ($is_node && !empty($apikey) && !empty($websiteid) && _recommenderghost_visibility_pages() && _recommenderghost_visibility_user($user) && _recommenderghost_visibility_content_types($node)) {
+    // If node view then define the node variables we want to track.
+    if ($is_node) {
+      // Get node id and site URL.
+      $item_id = $node->nid;
+      $item_url = $_SERVER["REQUEST_URI"];
+      $title = $node->title;
+      if (!$title) {
+        $title = "";
+      }
+
+      $img_field = variable_get('recommenderghost_image_token_field', '');
+      $path = token_replace($img_field, array('node' => $node));
+      // Filter unchanged tokens.
+      $clean = preg_replace('/\[(.*)\]/is', "", $path);
+      $clean_array = explode(",", $clean);
+
+      // Only use relative paths as recommended.
+      $url = parse_url(trim($clean_array[0]));
+      $item_image_url = $url['path'];
+    }
+
+    // We allow different methods. Default to 'JS' but
+    // allow users to override if they really need to.
+    $method = variable_get('recommenderghost_tracking_method', 'JS');
+
+    // Check which method (REST or JS) to use for tracking.
+    // REST will only work if no caching (eg Varnish, Boost) will be used.
+    if ($method == "REST" && $is_node) {
+      $recommendations = recommenderghost_call_api("view", array(
+        "itemid" => $item_id,
+        "itemdescription" => $title,
+        "itemurl" => $item_url,
+        "itemimageurl" => $item_image_url,
+        "sessionid" => session_id(),
+        ));
+    }
+    else {
+      // We allow different scopes for JS. Default to 'header' but allow user
+      // to override if they really need to.
+      $scope = variable_get('recommenderghost_js_scope', 'header');
+
+      // Add any custom code snippets if specified.
+      $codesnippet_before = variable_get('recommenderghost_codesnippet_before', '');
+      $codesnippet_after = variable_get('recommenderghost_codesnippet_after', '');
+
+      // Build tracker code.
+      $script_tracker = 'var apiKey = ' . drupal_json_encode($apikey) . ';';
+      $script_tracker .= 'var tenantId = ' . drupal_json_encode($websiteid) . ';';
+
+      $script = "";
+      if (!empty($codesnippet_before)) {
+        $script .= $codesnippet_before;
+      }
+
+      if ($is_node) {
+        $script .= "
+        easyrec_sendAction('view',{
+            itemId:'" . $item_id . "',
+            itemUrl:'" . check_url($item_url) . "',
+            itemDescription: '" . check_plain($title) . "',";
+        if ($item_image_url) {
+          $script .= "
+            itemImageUrl:'" . check_url($item_image_url) . "',";
+        }
+        if ($uid) {
+          $script .= "
+            userId:'" . $uid . "',";
+        }
+        $script .= "
+          });
+          ";
+      }
+
+      if (!empty($codesnippet_after)) {
+        $script .= $codesnippet_after;
+      }
+      // JS file and tracker vars need to be in header so that blocks work.
+      // Code for actual tracking can be put to footer.
+      // TODO: use 'group' => JS_LIBRARY,
+      drupal_add_js(RECOMMENDERGHOST_API_URL . "/api-js/ghost.js",
+                    array('scope' => 'header'));
+      drupal_add_js($script_tracker,
+                    array('scope' => 'header', 'type' => 'inline'));
+      if ($script && $is_node) {
+        drupal_add_js($script, array('scope' => $scope, 'type' => 'inline'));
+      }
+    }
+  }
+}
+
+/**
+ * Return visibility setting based on current page.
+ */
+function _recommenderghost_visibility_pages() {
+  static $page_match;
+
+  // Cache visibility result if function is called more than once.
+  if (!isset($page_match)) {
+
+    $visibility = variable_get('recommenderghost_visibility_pages', 0);
+    $setting_pages = variable_get('recommenderghost_pages', RECOMMENDERGHOST_PAGES);
+
+    // Match path if necessary.
+    if (!empty($setting_pages)) {
+      // Convert path to lowercase. This allows comparison of the same path
+      // with different case. Ex: /Page, /page, /PAGE.
+      $pages = drupal_strtolower($setting_pages);
+      if ($visibility < 2) {
+        // Convert the Drupal path to lowercase.
+        $path = drupal_strtolower(drupal_get_path_alias($_GET['q']));
+        // Compare the lowercase internal and lowercase path alias (if any).
+        $page_match = drupal_match_path($path, $pages);
+        if ($path != $_GET['q']) {
+          $page_match = $page_match || drupal_match_path($_GET['q'], $pages);
+        }
+        // When $visibility has a value of 0, the tracking code is displayed on
+        // all pages except those listed in $pages. When set to 1, it
+        // is displayed only on those pages listed in $pages.
+        $page_match = !($visibility xor $page_match);
+      }
+      elseif (module_exists('php')) {
+        $page_match = php_eval($setting_pages);
+      }
+      else {
+        $page_match = FALSE;
+      }
+    }
+    else {
+      $page_match = TRUE;
+    }
+
+  }
+  return $page_match;
+}
+
+
+/**
+ * Return visibility settings for current role.
+ */
+function _recommenderghost_visibility_roles($account) {
+
+  $visibility = variable_get('recommenderghost_visibility_roles', 0);
+  $enabled = $visibility;
+  $roles = variable_get('recommenderghost_roles', array());
+
+  if (array_sum($roles) > 0) {
+    // One or more roles are selected.
+    foreach (array_keys($account->roles) as $rid) {
+      // Is the current user a member of one of these roles?
+      if (isset($roles[$rid]) && $rid == $roles[$rid]) {
+        // Current user is a member of a role that should be tracked/
+        // excluded from tracking.
+        $enabled = !$visibility;
+        break;
+      }
+    }
+  }
+  else {
+    // No role is selected for tracking, therefore all roles should be tracked.
+    $enabled = TRUE;
+  }
+
+  return $enabled;
+}
+
+
+/**
+ * Return visibility settings for current content type.
+ */
+function _recommenderghost_visibility_content_types($node) {
+
+  $visibility = variable_get('recommenderghost_visibility_content_types', 0);
+  $enabled = $visibility;
+  $content_types = variable_get('recommenderghost_content_types', array());
+
+  if (count($content_types) > 0) {
+    // One or more content_types are selected.
+    $type = $node->type;
+    if (isset($content_types[$type]) && $type === $content_types[$type]) {
+      // Current node is a member of content type that should be tracked/
+      // excluded from tracking.
+      $enabled = !$visibility;
+    }
+    else {
+      $enabled = $visibility;
+    }
+  }
+  else {
+    // No content_type is selected for tracking,
+    // therefore all content_types should be tracked.
+    $enabled = TRUE;
+  }
+  return $enabled;
+}
+
+/**
+ * Tracking visibility check for an user object.
+ *
+ * @param object $account
+ *   A user object containing an array of roles to check.
+ *
+ * @return bool
+ *   A decision on if the current user is being tracked by RecommenderGhost.
+ */
+function _recommenderghost_visibility_user($account) {
+
+  $enabled = FALSE;
+
+  // Is current user a member of a role that should be tracked?
+  if (_recommenderghost_visibility_roles($account)) {
+
+    // Use the user's block visibility setting, if necessary.
+    if (($custom = variable_get('recommenderghost_custom', 0)) != 0) {
+      if ($account->uid && isset($account->data['recommenderghost']['custom'])) {
+        $enabled = $account->data['recommenderghost']['custom'];
+      }
+      else {
+        $enabled = ($custom == 1);
+      }
+    }
+    else {
+      $enabled = TRUE;
+    }
+
+  }
+
+  return $enabled;
+}
+
+
+/**
+ * Implements a central REST query. Returns json of the result.
+ */
+function recommenderghost_call_api($function, $parameters) {
+  $apikey = variable_get('recommenderghost_apikey', '');
+  $websiteid = variable_get('recommenderghost_websiteid', '');
+  $url = RECOMMENDERGHOST_API_URL . "/api/1.0/json/" . $function;
+  $url .= "?apikey=$apikey&tenantid=$websiteid&";
+  $url .= http_build_query($parameters);
+  $response = drupal_http_request(($url), array(
+                                          "timeout" => 1,
+                                          ));
+  return json_decode($response->data);
+}
+
+/**
+ * Implements hook_block_info().
+ */
+function recommenderghost_block_info() {
+  $blocks['rg_also_viewed_list'] = array(
+    'info' => t('RecommenderGhost: Users also viewed (list view)'),
+    'cache' => DRUPAL_CACHE_PER_PAGE,
+  );
+  $blocks['rg_also_viewed_pictures'] = array(
+    'info' => t('RecommenderGhost: Users also viewed (picture view)'),
+    'cache' => DRUPAL_CACHE_PER_PAGE,
+  );
+  return $blocks;
+}
+
+
+/**
+ * Implements hook_block_view().
+ *
+ * The block defines various blocks for showing recommendations.
+ *
+ * TODO: Use different divs in JS so that you can display multiple blocks
+ *       on RecommenderGhost on the same page
+ * TODO: Make nb of recommendations configurable
+ * TODO: Make block view (list, pictures) configurable, not 2 blocks
+ */
+function recommenderghost_block_view($delta = '') {
+  global $user;
+  // Following privacy policy of RecommenderGhost we need to
+  // encode user ids into non-revertable formatOutput.
+  $uid = sha1($user->uid);
+  $nid = NULL;
+
+  $tracking_method = variable_get('recommenderghost_tracking_method', 'JS');
+
+  // Only show the recommendations for node views.
+  if (arg(0) == 'node' && is_numeric(arg(1)) && !arg(2)) {
+    $node = node_load(arg(1));
+    $nid = arg(1);
+  }
+  else {
+    // No node view.
+    return;
+  }
+
+  switch ($delta) {
+    case 'rg_also_viewed_list':
+      if (user_access('access content')) {
+        $block['subject'] = t("Users also viewed");
+        $div = "recommenderDivAlsoViewedList";
+        $drawing_callback = "drawRecommendationList";
+        $nb_of_recommendations = variable_get('recommenderghost_block_number_of_recommendations_rg_also_viewed_list', '5');
+      }
+      break;
+
+    case 'rg_also_viewed_pictures':
+      if (user_access('access content')) {
+        $block['subject'] = t("Users also viewed");
+        $div = "recommenderDivAlsoViewedPictures";
+        $drawing_callback = "drawRecommendationListWithPictures";
+        $nb_of_recommendations = variable_get('recommenderghost_block_number_of_recommendations_rg_also_viewed_pictures', '5');
+      }
+      break;
+  }
+
+  if ($tracking_method == "REST") {
+
+    // Grab recommendations from website using REST.
+    $recommendations = recommenderghost_call_api("otherusersalsoviewed", array(
+      "numberOfResults" => $nb_of_recommendations,
+      "itemid" => $nid)
+    );
+    // No recommendations for this item.
+    if (!isset($recommendations->recommendeditems->item)) {
+      return;
+    }
+    // If only one result then change array structure.
+    if (isset($recommendations->recommendeditems->item->creationDate)) {
+      $items[0] = $recommendations->recommendeditems->item;
+    }
+    else {
+      $items = $recommendations->recommendeditems->item;
+    }
+
+    // Correct some data.
+    $new_items = array();
+    foreach ($items as $item) {
+      $item->imageUrl = isset($item->imageUrl) ? $item->imageUrl : "http://www.recommenderghost.com/sites/all/themes/bootstrap/img/no_image.gif";
+      $new_items[] = $item;
+    }
+
+    if ($drawing_callback == "drawRecommendationList") {
+      $block['content'] = theme('recommenderghost_list', array('items' => $new_items));
+    }
+    else {
+      $block['content'] = theme('recommenderghost_picture_list', array('items' => $new_items));
+    }
+
+  }
+  else {
+
+    // JAVASCRIPT implementation.
+    $js = "
+    <script>
+    easyrec_getRecommendations('otherusersalsoviewed', {
+         itemId:'$nid',
+         numberOfResults: $nb_of_recommendations,
+         drawingCallback:'$drawing_callback',
+      }
+    );
+    </script>
+    <div id='recommenderDiv'></div>";
+    $block['content'] = $js;
+  }
+
+  return $block;
+}
+
+/**
+ * Implements hook_theme().
+ */
+function recommenderghost_theme() {
+  return array(
+    'recommenderghost_list' => array(
+      'variables' => array('items' => NULL),
+    ),
+    'recommenderghost_picture_list' => array(
+      'variables' => array('items' => NULL),
+    ),
+  );
+}
+
+/**
+ * Returns HTML for the list view.
+ */
+function theme_recommenderghost_list($items) {
+  extract($items);
+  $html = "<div id='recommenderghostList'><ul>";
+  foreach ($items as $item) {
+    $html .= "<li><a href='" . $item->url . "'>" . check_plain($item->description) . "</a></li>";
+  }
+  $html .= "</ul></div>";
+  return $html;
+}
+
+/**
+ * Returns HTML for the picture list view.
+ */
+function theme_recommenderghost_picture_list($items) {
+  extract($items);
+  $html = "<div id='recommenderghostPictureList'><ul>";
+  foreach ($items as $item) {
+    $html .= "<div style='width:170px;padding:5px;float:left;text-align:center;'><a href='" . $item->url . "'>";
+    $html .= "<img style='width:150px;border:0px;' alt='" . check_plain($item->description) . "' src='" . $item->imageUrl . "'><br/>";
+    $html .= check_plain($item->description) . "</a></div>";
+  }
+  $html .= "</ul></div>";
+  return $html;
+}
+
+/**
+ * Implements hook_block_configure().
+ */
+function recommenderghost_block_configure($delta="") {
+  $form['blockconfig'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('RecommenderGhost block settings'),
+  );
+  $form['blockconfig']['recommenderghost_block_number_of_recommendations_' . $delta] = array(
+    '#type' => 'textfield',
+    '#title' => t('How many recommendations would you like to show?'),
+    '#description' => t('This parameter determines the number of recommendations retrieved from RecommenderGhost.'),
+    '#size' => 10,
+    '#maxlength' => 3,
+    '#default_value' => variable_get('recommenderghost_block_number_of_recommendations_' . $delta, '5'),
+  );
+  return $form;
+}
+
+/**
+ * Implements hook_block_save().
+ */
+function recommenderghost_block_save($delta='', $edit=array()) {
+  variable_set('recommenderghost_block_number_of_recommendations_' . $delta, $edit['recommenderghost_block_number_of_recommendations_' . $delta]);
+}

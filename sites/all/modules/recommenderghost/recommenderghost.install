@@ -13,6 +13,7 @@ function recommenderghost_uninstall() {
   variable_del('recommenderghost_websiteid');
   variable_del('recommenderghost_codesnippet_before');
   variable_del('recommenderghost_codesnippet_after');
+  variable_del('recommenderghost_drawingcallback');
   variable_del('recommenderghost_tracking_method');
   variable_del('recommenderghost_js_scope');
   variable_del('recommenderghost_pages');

@@ -89,6 +89,42 @@ function recommenderghost_admin_settings_form($form_state) {
     '#description' => t('If none of the content types are selected, all content types will be tracked. If one or more content types are checked, that content type will be tracked (or excluded, depending on the setting above).'),
   );
 
+  // Render the item mapping overview.
+  $form['tracking']['item_type_settings'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Item Types'),
+    '#description' => t('You can map your content types to item types created in RecommenderGhost. Standard item type is ITEM.'),
+  );
+
+  if (variable_get('recommenderghost_apikey', '')) {
+    $item_obj = recommenderghost_call_api("itemtypes", array());
+    if (!isset($item_obj->error) && $item_obj->itemTypes->itemType != "ITEM") {
+      $items = $item_obj->itemTypes->itemType;
+      $item_array = array();
+      foreach ($items as $item) {
+        $item_array[$item] = $item;
+      }
+    }
+    else {
+      $item_array = array("ITEM" => "ITEM");
+    }
+    $node_types = node_type_get_types();
+    $node_types_array = array();
+    foreach ($node_types as $node_type_obj) {
+      $node_types_array[$node_type_obj->type] = $node_type_obj->name;
+      $form['tracking']['item_type_settings']['recommenderghost_mapping_' . $node_type_obj->type] = array(
+        '#type' => 'select',
+        '#title' => t('Select item type for @node_type', array('@node_type' => $node_type_obj->type)
+        ),
+        '#default_value' => variable_get('recommenderghost_mapping_' . $node_type_obj->type, 'ITEM'),
+        '#options' => $item_array,
+      );
+    }
+  }
+  else {
+    $form['tracking']['item_type_settings']['#description'] .= "<br/>" . t('You need to add your API key and Website ID before you can do any item mapping.');
+  }
+
   // Render the images overview.
   $form['tracking']['images'] = array(
     '#type' => 'fieldset',
@@ -201,30 +237,44 @@ function recommenderghost_admin_settings_form($form_state) {
     '#collapsed' => TRUE,
   );
 
+  // Code snippet custom callback.
+  $custom_drawback = "function drawCustomCallbackToDiv(json,recommenderDiv){\n" .
+                                "if(\"undefined\"==typeof(json.error) ) { // if no error show recommendations\n" .
+                                " try{\n" .
+                                "      var items = json.recommendeditems.item; \n" .
+                                " }catch(e){\n" .
+                                "     return; //no recommendations found\n  }\n" .
+                                " /* when the object is already in array format, this block will not execute */\n" .
+                                " if( \"undefined\" == typeof(items.length) ) {\n" .
+                                "     items = new Array(items);\n }\n" .
+                                " // display recommendations in the DIV layer specified in the parameter recommenderDiv\n" .
+                                " if (items.length>0) {\n" .
+                                "     for (x=0;x<15 && x <items.length;x++) {\n" .
+                                "           document.getElementById(recommenderDiv).innerHTML +=\n" .
+                                "               \"<div style='width:170px;padding:5px;float:left;text-align:center;\'>\"+\n" .
+                                "               \"<a href='\"               + items[x].url + \"'>\" +" .
+                                "               \"<img style='width:150px;border:0px;' alt='\" + items[x].description + \"'\"+\n" .
+                                "               \"     src='\"+ items[x].imageUrl + \"'/><br/>\"\n" .
+                                "                + items[x].description +\n" .
+                                "               \"</a>\" +\n" .
+                                "               \"</div>\";\n" .
+                                "     }\n  }\n }\n}\n";
   $form['advanced']['codesnippet'] = array(
     '#type' => 'fieldset',
     '#title' => t('Custom JavaScript code'),
     '#collapsible' => TRUE,
     '#collapsed' => TRUE,
-    '#description' => t('You can add custom RecommenderGhost <a href="@snippets">code snippets</a> here. These will be added every time tracking is in effect. Before you add your custom code, you should read the <a href="rg_js">RecommenderGhost Tracking API</a> documentation.<strong> Do not include the &lt;script&gt; tags</strong>, and always end your code with a semicolon (;).', array(
-          '@snippets' => 'http://drupal.org/node/248699',
-          '@rg_js' => 'http://www.recommenderghost.com/js-api')),
-  );
-  $form['advanced']['codesnippet']['recommenderghost_codesnippet_before'] = array(
+    '#description' => t('You can customize the layout of the recommendation blocks by defining your own drawing callback function. <strong>This function must be called drawCustomCallbackToDiv</strong>. Below Javascript code will only be used if API method is set to Javascript and the below method is explicitly defined in the block settings. <strong>Do not include the &lt;script&gt; tags</strong>, and always end your code with a semicolon (;).'), array());
+  $form['advanced']['codesnippet']['recommenderghost_drawingcallback'] = array(
     '#type' => 'textarea',
-    '#title' => t('Code snippet (before)'),
-    '#default_value' => variable_get('recommenderghost_codesnippet_before', ''),
-    '#rows' => 5,
-    '#description' => t("Code in this textarea will be added <strong>before</strong> .sendAction()."),
-  );
-  $form['advanced']['codesnippet']['recommenderghost_codesnippet_after'] = array(
-    '#type' => 'textarea',
-    '#title' => t('Code snippet (after)'),
-    '#default_value' => variable_get('recommenderghost_codesnippet_after', ''),
-    '#rows' => 5,
-    '#description' => t("Code in this textarea will be added <strong>after</strong> .sendAction()."),
+    '#title' => t('Drawing callback function'),
+    '#default_value' => variable_get('recommenderghost_drawingcallback', $custom_drawback),
+    '#rows' => 30,
+    '#wysiwyg' => FALSE,
+    '#description' => t("You can customize the layout of the JS recommendation blocks by defining your own drawing callback function. This function will only be used if defined in the block settings."),
   );
 
+  // Scope of JS.
   $form['advanced']['recommenderghost_js_scope'] = array(
     '#type' => 'select',
     '#title' => t('JavaScript scope'),
@@ -249,22 +299,11 @@ function recommenderghost_admin_settings_form_validate($form, &$form_state) {
   $form_state['values']['recommenderghost_apikey'] = trim($form_state['values']['recommenderghost_apikey']);
   $form_state['values']['recommenderghost_websiteid'] = trim($form_state['values']['recommenderghost_websiteid']);
   $form_state['values']['recommenderghost_pages'] = trim($form_state['values']['recommenderghost_pages']);
-  $form_state['values']['recommenderghost_codesnippet_before'] = trim($form_state['values']['recommenderghost_codesnippet_before']);
-  $form_state['values']['recommenderghost_codesnippet_after'] = trim($form_state['values']['recommenderghost_codesnippet_after']);
+  $form_state['values']['recommenderghost_drawingcallback'] = trim($form_state['values']['recommenderghost_drawingcallback']);
   $form_state['values']['recommenderghost_image_token_field'] = trim($form_state['values']['recommenderghost_image_token_field']);
 
-  // This is for the Newbie's who cannot read a text area description.
-  if (stristr($form_state['values']['recommenderghost_codesnippet_before'], 'api.recommenderghost.com/api-js/ghost.js')) {
-    form_set_error('recommenderghost_codesnippet_before', t('Do not add the tracker code provided by RecommenderGhost into the javascript code snippets! This module already builds the tracker code based on your RecommenderGhost API key and website ID.'));
-  }
-  if (stristr($form_state['values']['recommenderghost_codesnippet_after'], 'api.recommenderghost.com/api-js/ghost.js')) {
-    form_set_error('recommenderghost_codesnippet_after', t('Do not add the tracker code provided by RecommenderGhost into the javascript code snippets! This module already builds the tracker code based on your RecommenderGhost API key and website ID.'));
-  }
-  if (preg_match('/(.*)<\/?script(.*)>(.*)/i', $form_state['values']['recommenderghost_codesnippet_before'])) {
-    form_set_error('recommenderghost_codesnippet_before', t('Do not include the &lt;script&gt; tags in the javascript code snippets.'));
-  }
-  if (preg_match('/(.*)<\/?script(.*)>(.*)/i', $form_state['values']['recommenderghost_codesnippet_after'])) {
-    form_set_error('recommenderghost_codesnippet_after', t('Do not include the &lt;script&gt; tags in the javascript code snippets.'));
+  if (preg_match('/(.*)<\/?script(.*)>(.*)/i', $form_state['values']['recommenderghost_drawingcallback'])) {
+    form_set_error('recommenderghost_drawingcallback', t('Do not include the &lt;script&gt; tags in the javascript code snippet.'));
   }
 
 }
